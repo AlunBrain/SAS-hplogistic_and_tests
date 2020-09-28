@@ -1,0 +1,950 @@
+/** this part actually build the model and carries out the tests
+This part has to be done partially manually, to enable the right
+decision are made
+
+1) set your target variable as it maeks it easier for the rest of the program
+2) using the data set inmem.varuse0_9, this create a mcro of all of
+the variables we wish to keep from buildx and validx
+   2a) a new dataset is created inmem.moddata, which contains everything
+
+3)  perform iniital model using WoE values.
+    a)check if charactieristic variables make a significance
+difference in performance, if not then just stick to numeric.
+    a1) if they, then check the binning to see if they make sense
+before carrying on.
+
+4) build inital model and carry out validation exercises
+    4a) stabiloty with validation (possuiblt bootstrap requirement)
+    4b) reversal - check beta values are behaving the same as the data
+reversal has to be conducted on all the data as sometime build and
+validation ay have variables that behave differently due to sampling
+    4c) correltation - all data
+    4d) contribution - all data
+*/
+
+libname inmem 'C:\inmem';
+libname rej 'C:\Reject';
+
+options compress=yes;
+
+%let targetVar=bad;
+%let id = loan_history_id;
+
+proc sql noprint;
+  select _name_ into: allnum separated by ' '
+  from inmem.varuse0_9 a
+  where form=1 and _name_ not in ('GC_APRa', 'Agreement_Number') ;
+quit;
+
+proc sql noprint;
+  select _name_ into: allchar separated by ' '
+  from inmem.varuse0_9
+  where form=2 AND _name_ not in ('GC_APRa');
+quit;
+
+proc sql noprint;
+  select compress(vari||'bin') into: allbin separated by ' '
+  from inmem.varuse0_9;
+quit;
+
+
+
+/*
+
+data rej.rimodeldata ;
+  set buildx1(keep= &allnum. &allchar.  &allbin. &targetVar.   &id.
+sampleAllocation weight)
+      validx1(keep= &allnum. &allchar.  &allbin. &targetVar.   &id.
+sampleAllocation weight);
+run;
+
+data rej.riootdata(keep= &allnum. &allchar.  &allbin. &targetVar.
+&id. sampleAllocation weight);
+   format sampleAllocation $10.;
+  set rejpop;
+ sampleAllocation='OOT';
+run;*/
+
+data build2;
+  set rej.rimodeldata ;
+   if sampleallocation='build';
+run;
+
+data valid2;
+  set rej.rimodeldata ;
+   if sampleallocation='valid';
+run;
+
+data alldat;
+  set build2 valid2;
+run;
+
+*OOT rej.riootdata;
+
+* old model;
+*arba BNa cica fia  JFa  NGa QICa Xa YGCa;
+*replacing the above with ther coprralted vars
+arb = kh cic = nmb   fi = ei   qic = oic
+
+;
+proc hplogistic data=build2 ;
+  model &targetVar.(event='1') =   CHa  CRBa
+GC_Affordabilitya GC_DisposableIncomeyya
+ OLa PLa QEBa
+  kha nmba eia oica
+
+/ association;
+ * selection method=stepwise (slstay=0.000001 sle=0.000001 );
+  weight weight;
+run;
+
+/* first part checks if characteristic variables contribute
+significantly to the model*/
+
+proc hplogistic data=build2 ;
+  model &targetVar.(event='1') =  &allchar. &allnum. / association;
+  selection method=stepwise (slstay=0.00000001 sle=0.00000001 );
+  weight weight;
+run;
+
+* somers d = 33.6;
+
+
+proc hplogistic data=build2 ;
+  model &targetVar.(event='1') = &allnum. / association;
+  selection method=stepwise (slstay=0.00000001 sle=0.00000001 );
+  weight weight;
+run;
+
+
+
+/** if no differences so can carry on (within 2%), else explore
+charcter variables to
+check importance  **/
+
+
+
+proc hplogistic data=build2 ;
+ODS OUTPUT ParameterEstimates=mod_est;
+  model &targetVar.(event='1') =  &allnum. / association;
+  selection method=stepwise (slstay=0.000000001 sle=0.000000001 );
+run;
+
+
+/** get the results from file mod_est to score up buid and validation set */
+
+data modcode;
+  format codey $80.;
+  set mod_est(keep=Parameter estimate);
+  if parameter ='Intercept' then do;
+        codey = compress(parameter||'='||estimate||';');
+vars = Parameter;
+end;
+    else do;
+       codey = compress(Parameter||'_s='||estimate||'*'||Parameter||';');
+        vars = compress(Parameter||'_s');
+   end;
+run;
+
+proc sql noprint;
+  select codey into: coder separated by ' '
+  from modcode;
+quit;
+proc sql noprint;
+  select vars into: varer separated by ', '
+  from modcode;
+quit;
+
+
+
+proc sql noprint;
+  select sum(1) into: numvarer
+  from modcode
+  where parameter ne 'Intercept';
+quit;
+
+%put &numvarer.;
+
+
+data allres1(keep= &id. prob sampleAllocation  &targetVar.)
+     alldat1;
+  format prob percent10.4;
+  set alldat;
+  &coder.;
+
+  xbeta = sum(&varer.);
+  prob = 1 / (1 + exp(-xbeta));
+run;
+
+
+
+proc freq data=allres1 noprint;
+  table prob* &targetVar. / measures noprint;
+  output out=valgin measures;
+  where sampleAllocation='Validation';
+run;
+
+data valgin(keep=group gini auc sampleAllocation);
+  format group $32. sampleAllocation $15.;
+  set valgin;
+  AUC=_smdrc_/2 + 0.5;
+   Gini =  _smdrc_;
+    sampleAllocation='Validation';
+   group =compress("Excl_&param.");
+run;
+
+
+proc freq data=allres1 noprint;
+  table prob* &targetVar. / measures noprint;
+  output out=buildgin measures;
+  where sampleAllocation='Build';
+run;
+
+data buildgin(keep=group gini auc sampleAllocation);
+  format group $32. sampleAllocation $15.;
+  set buildgin;
+  AUC=_smdrc_/2 + 0.5;
+   Gini =  _smdrc_;
+    group =compress("Excl_&param.");
+   sampleAllocation='Build';
+run;
+
+data gini;
+  set  buildgin valgin ;
+run;
+
+
+
+%macro modelsel;
+proc sql;
+  drop table modres;
+  quit;
+
+%do i = 1 %to &numvarer.;
+
+
+proc hplogistic data=build2 ;
+ODS OUTPUT ParameterEstimates=modest;
+  model &targetVar.(event='1') = &allnum.   / association;
+    selection method=stepwise(slstay=0.00000001 sle=0.00000001  maxsteps=&i.);
+run;
+
+
+data modcode;
+  format codey $80.;
+  set modest(keep=Parameter estimate);
+  if parameter ='Intercept' then do;
+        codey = compress(parameter||'='||estimate||';');
+vars = Parameter;
+end;
+    else do;
+       codey = compress(Parameter||'_s='||estimate||'*'||Parameter||';');
+        vars = compress(Parameter||'_s');
+   end;
+run;
+
+proc sql noprint;
+  select codey into: coder separated by ' '
+  from modcode;
+quit;
+proc sql noprint;
+  select vars into: varer separated by ', '
+  from modcode;
+quit;
+
+data alldat1;
+  format prob percent10.4;
+  set alldat;
+  &coder.;
+
+  xbeta = sum(&varer.);
+  prob = 1 / (1 + exp(-xbeta));
+run;
+
+
+proc freq data=alldat1 noprint;
+  table prob*&targetVar. / measures noprint;
+  output out=buildgin measures;
+  where sampleAllocation='Build';
+run;
+
+data buildgin(keep=step buildAUC buildGini);
+  set buildgin;
+  buildAUC=_smdrc_/2 + 0.5;
+  buildGini =  _smdrc_;
+  step=&i.;
+run;
+
+proc freq data=alldat1 noprint;
+  table prob*&targetVar. / measures noprint;
+  output out=valgin measures;
+  where sampleAllocation='Validation';
+run;
+
+data valgin(keep=step validAUC validGini);
+  set valgin;
+  validAUC=_smdrc_/2 + 0.5;
+   validGini =  _smdrc_;
+   step=&i.;
+run;
+
+
+data meas1;
+  format vars $250.;
+  merge buildgin
+        valgin;
+by step;
+  vars = "&varer.";
+run;
+
+
+
+proc append data= meas1 base=modres force;
+run;
+%end;
+%mend modelsel;
+
+
+%modelsel;
+
+
+*all came in somers d of 43;
+
+data modcode;
+  format codey $80.;
+  set HPLogiPE(keep=Parameter estimate);
+  if parameter ='Intercept' then do;
+        codey = compress(parameter||'='||estimate||';');
+vars = Parameter;
+end;
+    else do;
+       codey = compress(Parameter||'_s='||estimate||'*'||Parameter||';');
+        vars = compress(Parameter||'_s');
+   end;
+run;
+
+proc sql noprint;
+  select codey into: coder separated by ' '
+  from modcode;
+quit;
+proc sql noprint;
+  select vars into: varer separated by ', '
+  from modcode;
+quit;
+
+data alldat1;
+  format prob percent10.4;
+  set alldat;
+  &coder.;
+
+  xbeta = sum(&varer.);
+  prob = 1 / (1 + exp(-xbeta));
+run;
+
+
+data rejpop1;
+  format prob percent10.4;
+  set rej.rejpop2;
+  &coder.;
+
+  xbeta = sum(&varer.);
+  prob = 1 / (1 + exp(-xbeta));
+run;
+
+proc freq data=alldat1 noprint;
+  table prob*&targetVar. / measures noprint;
+  output out=buildgin measures;
+  where sampleAllocation='Build';
+run;
+
+data buildgin(keep=gini auc samp);
+  format samp $10.;
+  set buildgin;
+  AUC=_smdrc_/2 + 0.5;
+  Gini =  _smdrc_;
+  samp='build';
+run;
+
+proc freq data=alldat1 noprint;
+  table prob*&targetVar. / measures noprint;
+  output out=valgin measures;
+  where sampleAllocation='Validation';
+run;
+
+data valgin(keep=gini auc samp);
+  format samp $10.;
+  set valgin;
+  AUC=_smdrc_/2 + 0.5;
+   Gini =  _smdrc_;
+   samp='valid';
+run;
+
+
+
+%reversal(&targetvar.);
+
+
+proc sort data=reversa;
+  by variable score;
+run;
+
+data reversa1;
+  set reversa(rename=(_freq_ = numm));
+  by variable;
+  sup=0; sdown=0; bup=0; bdown=0;
+  if first.variable then do;
+    sup=0; sdown=0; bup=0; bdown=0;
+
+  end;
+  else do;
+    if badrate >lag(badrate) then bup=1;
+if badrate <lag(badrate) then bdown=1;
+if score >lag(score) then sup=1;
+if score <lag(score) then sdown=1;
+  end;
+run;
+
+data err;
+  set reversa1;
+  if bup^=sup or bdown^=sdown;
+run;
+
+
+data bootval;
+  set alldat1(keep=prob &targetVar sampleAllocation);
+  if sampleAllocation='Validation';
+run;
+
+proc sql;
+  drop table final_gini;
+quit;
+
+
+%macro bootstrap(dataset,score,target);
+
+/** take a random 10% of dataset  **/
+
+%do i = 1 %to 100;
+
+data work.boot1;
+   set &dataset. (keep= &score. &target.);
+   if ranuni(&i.) <=0.15;
+run;
+
+/** claulate the Gini  **/
+
+proc freq data=work.boot1 noprint;
+  tables &score. * &target. / measures noprint;
+  output out=work.boot2 measures;
+run;
+
+data work.gini_&i.(keep=gini group);
+  set work.boot2;
+  gini = _smdrc_;
+  group = &i.;
+run;
+
+/** append the dataset to eachother   **/
+
+proc append base = work.final_gini data = work.gini_&i. force;
+run;
+
+proc sql;
+  drop table work.gini_&i. ;
+  quit;
+
+%end;
+
+%mend;
+
+%BOOTSTRAP(work.bootval,prob,&targetvar.);
+
+proc univariate data = final_gini ;
+var gini;
+run;
+
+/**nope **/
+
+/** check for correltaion  */
+%put &varer.;
+
+
+proc sql noprint;
+  select vars into: varerx separated by ' '
+  from modcode
+  where vars ne 'Intercept';
+quit;
+
+proc corr data= alldat1 out= corr;
+  var &varerx.;
+  where sampleAllocation='Build';
+run;
+/** all pass correltaion test @ 0.8 mark**/
+
+/*** reversal causality  **/
+
+
+%macro reversal(target);
+
+proc sql;
+  drop table work.reversa;
+quit;
+
+data boom;
+  format var $32.;
+  set mod_est(keep=Parameter estimate);
+  if parameter^='Intercept';
+  n+1;
+  var = substr(parameter,1, (length(Parameter)-1));
+run;
+
+data _null_;
+  set boom;
+  call symput('fin', n);
+run;
+
+%do i = 1 %to &fin.;
+
+data _null_;
+  format bin est $32.;
+  set boom;
+  if n = &i.;
+  bin = compress(var||'bin');
+  est = compress(var||'a_s');
+  call symput('voom', var);
+  call symput('bin', bin);
+  call symput('est', est);
+  call symput('woeval', parameter);
+run;
+
+
+proc summary data = work.alldat1 nway;
+  class &bin. &est. &woeval.;
+  var &target.;
+  output out = work.rev1 (drop=_type_) sum=;
+run;
+
+data work.rev2;
+  format variable $20.;
+  set work.rev1(rename=(&bin.=bin &est.=score  &woeval. = woe));
+  variable = "&voom.";
+  badrate = &target. /_freq_;
+run;
+
+proc append data=work.rev2 base=work.reversa force;
+
+%end;
+
+%mend;
+
+%reversal(&targetvar.);
+
+
+proc sort data=reversa;
+  by variable score;
+run;
+
+data reversa1;
+  set reversa(rename=(_freq_ = numm));
+  by variable;
+
+  lbadtrate=lag(badrate);
+  lscore=lag(score);
+  sup=0; sdown=0; bup=0; bdown=0;
+  if first.variable then do;
+    sup=0; sdown=0; bup=0; bdown=0;
+
+  end;
+  else do;
+    if badrate >lbadtrate then bup=1;
+if badrate <lbadtrate then bdown=1;
+if score >lscore then sup=1;
+if score <lscore then sdown=1;
+  end;
+run;
+
+data err;
+  set reversa1;
+  if bup^=sup or bdown^=sdown;
+run;
+/* all ok **/
+
+/** contribution  **/
+
+
+/** contributory analysis **/
+
+
+proc summary data= reversa1 nway;
+  class variable;
+  var numm;
+  output out=contrib(drop=_type_ _freq_) sum=;
+run;
+
+*score=estimate;
+data contrib1;
+  merge reversa1
+        contrib(rename=(numm=totty));
+by variable;
+  sumprod = score * (numm / totty);
+run;
+
+proc summary data=work.contrib1 nway;
+  class variable;
+  var sumprod ;
+  output out = work.contrib2(drop=_type_ _freq_) sum=;
+run;
+
+
+
+proc sql;
+  create table work.contrib3 as
+  select a.variable, a.bin, score, numm, numm/totty as percent,
+          a.sumprod, b.sumprod as scor
+  from work.contrib1 a left join work.contrib2 b
+  on a.variable=b.variable
+  order by a.variable, a.bin;
+quit;
+
+data work.contrib4;
+  set work.contrib3;
+  by variable;
+  if score=. then score=0;
+  oldscor=scor1;
+  if first.variable then  oldscor=0;
+  scor1 = abs((score - scor) * percent) + oldscor;
+  retain scor1;
+  if last.variable;
+  all='all';
+run;
+
+proc summary data = work.contrib4 nway;
+  class all;
+  var scor1 ;
+  output out = work.contrib5(drop=_type_ _freq_) sum=;
+run;
+
+
+options nocentre;
+title 'marginal Contribution table';
+proc sql;
+   create table contrib6 as
+  select a.variable,
+         (a.scor1 / b.scor1) as contribution format=percent10.3
+
+  from work.contrib4 a, work.contrib5 b
+  where a.all=b.all
+  order by 2 desc;
+quit;
+
+
+data contrib7;
+  set contrib6;
+
+if substr(left(reverse(variable)),1,2) in ('xx' 'yy')  then
+     vari = substr(variable,1,length(variable)-2);
+else vari=variable;
+run;
+
+
+proc sql;
+  create table contrib8 as
+  select a.*, b.descr
+  from contrib7 a left join callcredit b
+  on a.vari=b.code;
+quit;
+
+
+
+
+
+
+
+/** vintile graphs **/
+
+
+proc sort data= allres1;
+  by sampleAllocation;
+run;
+
+proc rank data=allres1 groups=20 out=allres2 ties=low;
+by sampleAllocation;
+  ranks r;
+  var prob;
+run;
+
+
+proc summary data=allres2 nway;
+  class sampleAllocation r;
+  var &targetVar;
+  output out= allres3(drop=_type_) sum=;
+run;
+
+data vint_exl;
+  format  badrate percent10.2 ;
+  set allres3;
+  badrate = &targetVar / _freq_;
+
+  r = r + 1;
+run;
+
+
+/** roc curve statistics **/
+
+
+proc rank data=allres1 groups=100 out=allres5 ties=low;
+  by sampleAllocation;
+  ranks r;
+  var prob;
+run;
+
+proc summary data=allres5 nway;
+  class sampleAllocation r;
+  var &targetvar.;
+  output out= allres6(drop=_type_) sum=;
+run;
+
+
+proc summary data=allres5 nway;
+  class sampleAllocation ;
+  var &targetvar.;
+  output out= allres7(drop=_type_ ) sum=;
+run;
+
+data allres8;
+  merge allres6
+        allres7(rename=(&targetvar.=tottarg _freq_ = totty));
+by sampleallocation;
+  pos = _freq_ - &targetvar.;
+  totpos = totty -tottarg;
+run;
+
+data allres8a;
+  set allres7(rename=(&targetvar.=tottarg _freq_ = totty));
+  r=-1;
+  _freq_=0;
+  &targetvar.=0;
+  pos=0;
+  totpos = totty -tottarg;
+run;
+
+data allres8b;
+  set allres8 allres8a;
+run;
+proc sort data= allres8b;
+  by sampleAllocation r;
+run;
+
+data allres9;
+  set allres8b;
+  by sampleAllocation;
+  if first.sampleAllocation then do;
+    trueneg=0;
+falseneg=0;
+  end;
+  else do;
+     trueneg = trueneg + &targetvar.;
+     falseneg = pos + falseneg;
+  end;
+  retain trueneg falseneg;
+run;
+
+
+data ginidat;
+  set allres9;
+  n = r + 1;
+  base = n / 100;
+  truepos  = totpos - falseneg;
+  falsepos = tottarg - trueneg;
+
+  tpf = truepos / totpos;
+  fpf = falsepos / tottarg;
+run;
+
+
+data boom;
+  format var $32.;
+  set mod_est(keep=Parameter estimate);
+  if parameter^='Intercept';
+  n+1;
+  var = substr(parameter,1, (length(Parameter)-1));
+run;
+
+%macro reversal(target);
+
+proc sql;
+  drop table work.reversa;
+quit;
+
+data _null_;
+  set boom;
+  call symput('fin', n);
+run;
+
+%do i = 1 %to &fin.;
+
+data _null_;
+  format bin est $32.;
+  set boom;
+  if n = &i.;
+  bin = compress(var||'bin');
+  est = compress(var||'a_s');
+  call symput('voom', var);
+  call symput('bin', bin);
+  call symput('est', est);
+  call symput('woeval', parameter);
+run;
+
+
+proc summary data = work.alldat1 nway;
+  class &bin. &est. &woeval.;
+  var &target.;
+  output out = work.rev1 (drop=_type_) sum=;
+run;
+
+data work.rev2;
+  format variable $20.;
+  set work.rev1(rename=(&bin.=bin &est.=score  &woeval. = woe));
+  variable = "&voom.";
+  badrate = &target. /_freq_;
+run;
+
+proc append data=work.rev2 base=work.reversa force;
+
+%end;
+
+%mend;
+
+%reversal(isBad_d8p24_balGt100);
+
+
+/**dpo  **/
+
+%let baseline=300;   /* where score begins */
+%let oddsatbaseline=50; /* odd of baseline going bad */
+%let pointsdoubleodds =20 ; /* what we double the odss with */
+
+%put &baseline.;
+%put &oddsatbaseline.;
+%put &pointsdoubleodds.;
+
+
+data goku;
+  set mod_est(keep=Parameter estimate);
+  n+1;
+  if Parameter = 'Intercept' then call symput('inter', estimate);
+  factor = &pointsdoubleodds. / log(2);
+  offset = &baseline. - (factor * log(&oddsatbaseline));
+  call symput('numchars', n-1);
+  call symput('factor', factor);
+  call symput('offset', offset);
+run;
+
+%put &inter.;
+%put &factor.;
+%put &numchars.;
+%put &offset.;
+
+/*=1 / ((1 + EXP((F8-300) * (LN(2) / 20) + LN(50))))  score to a probability*/
+data dpo;
+  set reversa;
+  pdoscore = -(score + (&inter. / &numchars)) * &factor + (&offset. /
+&numchars.);
+run;
+
+*score = offset + factor*logodds;
+*logodds = log(1 / (1-p));
+
+
+data dpo1;
+  set allres1;
+  p = prob / (1-prob);
+  logodd = log(p);
+  score = round(&offset. + (&factor.*-logodd),1); /** this works  */
+  proba = 1/(( 1 + exp((score - &baseline.) *
+(log(2)/&pointsdoubleodds.) + log(&oddsatbaseline.)))); /** this works
+ **/
+  bad=isBad_d8p24_balGt100;
+  good = 1-bad;
+  all='all';
+run;
+
+proc summary data=dpo1 nway;
+  class all score;
+  var good bad;
+  output out=ks(drop=_type_ _freq_) sum=;
+run;
+
+proc summary data=dpo1 nway;
+  class all ;
+  var good bad;
+  output out=ks1(drop=_type_ _freq_) sum=;
+run;
+
+data ks2;
+  merge ks
+        ks1(rename=(good=totgood bad = totbad));
+by all;
+run;
+
+data ks3;
+  set ks2;
+  cumbad+bad;
+  cumgood+good;
+run;
+
+data ks4;
+  set ks3;
+  percgood = cumgood / totgood;
+  percbad  = cumbad  / totbad;
+  diff =  percbad - percgood;
+  format percgood percbad;
+run;
+
+proc sort data=ks4 out=ks5;
+  by descending diff;
+run;
+
+data _null_;
+  set ks5;
+  by all;
+  if first.all;
+  call symput('ks', diff);
+  call symput('atscore', score);
+  call symput('mini', percgood);
+  call symput('maxi', percbad);
+run;
+
+data ks6;
+  set ks4;
+  ks = &ks.;
+  ksscore = &atscore.;
+  ploty = &mini. + (ranuni(8) * (&maxi - &mini));
+run;
+
+
+
+
+
+
+/** default rate for reject **/
+
+
+DATA rej.rejpop3;
+  format appdate monyy5.;
+  set rejpop1(keep=loan_history_id prob lhapplication_date_time);
+  appdate = datepart(lhapplication_date_time);
+  if ranuni(4)<=0.1551;
+run;
+
+proc summary data=rej.rejpop3 ;
+class appdate;
+  var  prob ;
+  output out= rejstats(drop=_type_) sum=;
+  format prob 8.4;
+run;
+
+/** also score up OOT rejects **/
+
+proc contents data=rej.alloot;
+run;
